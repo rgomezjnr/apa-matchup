@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { db, updateSyncStatus, getSyncStatus } from '../data/db';
-import { apaClient, type GQLTeam, type GQLPlayer, type GQLMatch } from '../scraper/apa-client';
+import { apaClient, type GQLTeam, type GQLViewer, type GQLPlayer, type GQLMatch } from '../scraper/apa-client';
 import { MY_TEAM_ID, MY_DIVISION_ID, FORMAT, seedInitialData } from '../data/seed';
 import type { SyncStatus, Team, Player, Match } from '../data/types';
 
@@ -46,13 +46,13 @@ function transformTeam(gqlTeam: GQLTeam, isOurTeam: boolean): Team {
 
 // Transform GQL player to our Player type
 function transformPlayer(gqlPlayer: GQLPlayer, teamId: number): Player {
-  const winPct = gqlPlayer.matchesPlayed > 0 
-    ? (gqlPlayer.matchesWon / gqlPlayer.matchesPlayed) * 100 
+  const winPct = gqlPlayer.matchesPlayed > 0
+    ? (gqlPlayer.matchesWon / gqlPlayer.matchesPlayed) * 100
     : 0;
-  
+
   return {
     id: gqlPlayer.id,
-    aliasId: gqlPlayer.alias?.id || 0, // Alias ID for lifetime stats
+    aliasId: gqlPlayer.alias?.id || 0,
     memberId: gqlPlayer.member.id,
     memberNumber: gqlPlayer.memberNumber,
     name: gqlPlayer.displayName,
@@ -226,21 +226,36 @@ export const useSyncStore = create<SyncState>()(
           const viewer = await apaClient.getViewer();
           console.log('Connected as:', viewer.viewer.firstName, viewer.viewer.lastName);
           
-          // Step 2: Get our team's full data (roster + schedule)
+          // Step 2: Get viewer's teams with full roster + schedule.
+          // Using viewer { teams } avoids the permission restriction on direct team(id) queries.
           set({ syncProgress: 10, syncMessage: 'Fetching your team data...' });
-          const ourTeamData = await apaClient.getTeamFull(MY_TEAM_ID);
-          
+          console.log('[sync] Step 2: fetching viewer teams');
+          const viewerData = await apaClient.getViewerTeams();
+          const viewerTeams = (viewerData.viewer as GQLViewer & { teams?: GQLTeam[] }).teams ?? [];
+          console.log('[sync] viewer teams:', viewerTeams.map(t => `${t.name} (${t.id})`));
+
+          // Prefer the configured team ID, fall back to first team
+          const ourGqlTeam = viewerTeams.find(t => t.id === MY_TEAM_ID) ?? viewerTeams[0];
+          if (!ourGqlTeam) {
+            throw new Error('No teams found for your account. Verify your token is current.');
+          }
+          if (ourGqlTeam.id !== MY_TEAM_ID) {
+            console.warn(`[sync] MY_TEAM_ID ${MY_TEAM_ID} not found in viewer teams; using ${ourGqlTeam.name} (${ourGqlTeam.id})`);
+          }
+
+          const ourTeamData = { roster: ourGqlTeam, schedule: ourGqlTeam };
+
           if (!ourTeamData.roster) {
             throw new Error('Failed to fetch team roster. Check if team ID is correct.');
           }
-          
+
           // Save our team
           const ourTeam = transformTeam(ourTeamData.roster, true);
           await db.teams.put(ourTeam);
-          
+
           // Save our roster
-          const ourPlayers = ourTeamData.roster.roster?.map(p => 
-            transformPlayer(p, MY_TEAM_ID)
+          const ourPlayers = ourTeamData.roster.roster?.map(p =>
+            transformPlayer(p, ourGqlTeam.id)
           ) || [];
           
           if (ourPlayers.length === 0) {
@@ -257,17 +272,18 @@ export const useSyncStore = create<SyncState>()(
           // Step 3: Extract opponent team IDs from schedule
           const opponentTeamIds = new Set<number>();
           const matches: Match[] = [];
-          
+          const divisionId = ourGqlTeam.division?.id || MY_DIVISION_ID;
+
           for (const gqlMatch of ourTeamData.schedule.matches || []) {
-            const match = transformMatch(gqlMatch, MY_DIVISION_ID);
+            const match = transformMatch(gqlMatch, divisionId);
             if (match) {
               matches.push(match);
               
               // Track opponent teams
-              if (gqlMatch.home && gqlMatch.home.id !== MY_TEAM_ID) {
+              if (gqlMatch.home && gqlMatch.home.id !== ourGqlTeam.id) {
                 opponentTeamIds.add(gqlMatch.home.id);
               }
-              if (gqlMatch.away && gqlMatch.away.id !== MY_TEAM_ID) {
+              if (gqlMatch.away && gqlMatch.away.id !== ourGqlTeam.id) {
                 opponentTeamIds.add(gqlMatch.away.id);
               }
             }
@@ -282,14 +298,15 @@ export const useSyncStore = create<SyncState>()(
           
           // Step 4: Fetch all opponent team rosters in parallel
           const opponentIds = Array.from(opponentTeamIds);
-          console.log('Fetching rosters for teams:', opponentIds);
-          
+          console.log('[sync] Step 4: fetching opponent rosters for teams:', opponentIds);
+
           let processed = 0;
           const totalOpponents = opponentIds.length;
-          
+
           // Fetch in batches of 4 to avoid rate limiting
           for (let i = 0; i < opponentIds.length; i += 4) {
             const batch = opponentIds.slice(i, i + 4);
+            console.log('[sync] Step 4 batch:', batch);
             const teamRosters = await apaClient.getMultipleTeamRosters(batch);
             
             for (const gqlTeam of teamRosters) {
@@ -314,129 +331,8 @@ export const useSyncStore = create<SyncState>()(
             }
           }
           
-          // Step 5: Get member aliases to find alias IDs for lifetime stats
-          set({ syncProgress: 90, syncMessage: 'Fetching member aliases...' });
-          
-          const allPlayers = await db.players.toArray();
-          const uniqueMemberIds = [...new Set(allPlayers.map(p => p.memberId))];
-          
-          console.log(`Fetching aliases for ${uniqueMemberIds.length} members`);
-          
-          // Map to store member ID -> alias ID
-          const memberToAliasMap = new Map<number, number>();
-          
-          // Get our team's league ID (reuse ourTeam from earlier)
-          const ourTeamForLeague = await db.teams.filter(t => t.isOurTeam).first();
-          const leagueId = ourTeamForLeague?.leagueId;
-          
-          // Fetch member aliases in batches
-          for (let i = 0; i < uniqueMemberIds.length; i += 5) {
-            const batch = uniqueMemberIds.slice(i, i + 5);
-            try {
-              const memberAliasesArray = await apaClient.getMultipleMemberAliases(batch);
-              
-              for (const result of memberAliasesArray) {
-                if (!result?.member?.aliases) continue;
-                
-                const memberId = result.member.id;
-                // Find alias for our league
-                const alias = result.member.aliases.find(a => a.league?.id === leagueId);
-                if (alias) {
-                  memberToAliasMap.set(memberId, alias.id);
-                }
-              }
-              
-              const progress = 90 + Math.round(((i + batch.length) / uniqueMemberIds.length) * 3);
-              set({ 
-                syncProgress: progress, 
-                syncMessage: `Member aliases: ${i + batch.length}/${uniqueMemberIds.length}` 
-              });
-            } catch (err) {
-              console.warn('Failed to fetch member aliases for batch:', batch, err);
-            }
-          }
-          
-          console.log(`Found ${memberToAliasMap.size} aliases for lifetime stats`);
-          
-          // Update players with alias IDs
-          for (const player of allPlayers) {
-            const aliasId = memberToAliasMap.get(player.memberId);
-            if (aliasId) {
-              await db.players.update(player.id, { aliasId });
-            }
-          }
-          
-          // Step 6: Fetch lifetime stats via backend proxy (bypasses CORS)
-          set({ syncProgress: 94, syncMessage: 'Fetching lifetime stats via proxy...' });
-          
-          const aliasIds = [...new Set(memberToAliasMap.values())];
-          
-          console.log(`Fetching lifetime stats for ${aliasIds.length} aliases via backend proxy`);
-          
-          // Fetch in batches of 10 (proxy handles the batching)
-          for (let i = 0; i < aliasIds.length; i += 10) {
-            const batch = aliasIds.slice(i, i + 10);
-            try {
-              const aliasStatsArray = await apaClient.getMultipleAliasLifetimeStats(batch);
-              
-              for (const response of aliasStatsArray) {
-                // Proxy returns { data: { alias: ... } } format
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const alias = (response as any)?.data?.alias || (response as any)?.alias;
-                if (!alias) {
-                  console.log('No alias data in response');
-                  continue;
-                }
-                
-                const aliasId = alias.id;
-                // Get NineBall or EightBall stats based on format
-                const lifetimeStats = FORMAT === 'NINE' 
-                  ? alias.NineBallStats?.[0]
-                  : alias.EightBallStats?.[0];
-                
-                if (!lifetimeStats) {
-                  console.log(`No ${FORMAT} lifetime stats for alias ${aliasId}`);
-                  continue;
-                }
-                
-                console.log(`✅ Got lifetime stats for alias ${aliasId} (${alias.displayName}): ${lifetimeStats.matchesWon}W/${lifetimeStats.matchesPlayed}P`);
-                
-                // Calculate win percentage
-                const lifetimeWinPct = lifetimeStats.matchesPlayed > 0
-                  ? (lifetimeStats.matchesWon / lifetimeStats.matchesPlayed) * 100
-                  : 0;
-                
-                // Find all players with this alias ID and update them
-                for (const [memberId, aId] of memberToAliasMap.entries()) {
-                  if (aId === aliasId) {
-                    const playersToUpdate = allPlayers.filter(p => p.memberId === memberId);
-                    for (const player of playersToUpdate) {
-                      await db.players.update(player.id, {
-                        lifetimeMatchesPlayed: lifetimeStats.matchesPlayed,
-                        lifetimeMatchesWon: lifetimeStats.matchesWon,
-                        lifetimeWinPct: lifetimeWinPct,
-                        lifetimeDefensiveAvg: lifetimeStats.defensiveShotAvg,
-                      });
-                      console.log(`Updated player ${player.name} with lifetime stats`);
-                    }
-                  }
-                }
-              }
-              
-              const progress = 94 + Math.round(((i + batch.length) / aliasIds.length) * 4);
-              set({ 
-                syncProgress: progress, 
-                syncMessage: `Lifetime stats: ${i + batch.length}/${aliasIds.length} aliases` 
-              });
-            } catch (err) {
-              console.warn('Failed to fetch lifetime stats for alias batch:', batch, err);
-              // Continue with sync even if lifetime stats fail
-            }
-          }
-          
-          console.log(`Finished fetching lifetime stats for ${aliasIds.length} aliases`);
-          
-          // Step 6: Update sync status
+          // Step 5: Update sync status
+          // (Lifetime stats are now fetched inline with roster via alias { NineBallStats EightBallStats })
           set({ syncProgress: 98, syncMessage: 'Finalizing...' });
           
           const teamsCount = await db.teams.count();

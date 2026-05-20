@@ -227,7 +227,7 @@ export function SyncScreen() {
           <div className="mb-4 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
             <p className="text-blue-400 text-sm font-medium mb-2">How to get your token:</p>
             <ol className="text-slate-400 text-sm space-y-1 list-decimal ml-4">
-              <li>Go to <a href="https://members.poolplayers.com" target="_blank" rel="noopener" className="text-blue-400 underline">members.poolplayers.com</a> and log in</li>
+              <li>Go to <a href="https://league.poolplayers.com" target="_blank" rel="noopener" className="text-blue-400 underline">league.poolplayers.com</a> and log in</li>
               <li>Open Developer Tools (<span className="text-slate-300 font-mono">F12</span>)</li>
               <li>Click the <span className="text-slate-300">Network</span> tab</li>
               <li>Click on your team name or any page</li>

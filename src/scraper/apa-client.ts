@@ -55,7 +55,7 @@ export interface GQLPlayer {
   ppm: number; // Points per match
   skillLevel: number;
   member: { id: number };
-  alias?: { id: number }; // The alias ID (for lifetime stats)
+  alias?: { id: number };
   __typename: string;
 }
 
@@ -316,27 +316,30 @@ class APAClient {
     }
 
     const results = await response.json();
-    
+
     // Handle batch response (array of results)
     if (Array.isArray(results)) {
-      // Check for any errors in the batch
       const errors = results.filter(r => r.errors && r.errors.length > 0);
       if (errors.length > 0) {
-        const errorMessages = errors
-          .flatMap(r => r.errors)
-          .map((e: { message: string }) => e.message)
-          .join('; ');
-        console.error('GraphQL error:', errorMessages);
-        throw new Error(errorMessages);
+        const failedOps = errors.map((r, i) => {
+          const opName = operations[i]?.operationName || `op[${i}]`;
+          const msgs = r.errors.map((e: { message: string }) => e.message).join(', ');
+          return `${opName}: ${msgs}`;
+        });
+        console.error('GraphQL errors:', failedOps);
+        throw new Error(failedOps.join('; '));
       }
       return results.map(r => r.data);
     }
-    
+
     // Handle single response
     if (results.errors) {
-      throw new Error(results.errors[0]?.message || 'GraphQL error');
+      const opName = operations[0]?.operationName || 'unknown';
+      const msg = results.errors[0]?.message || 'GraphQL error';
+      console.error(`GraphQL error in ${opName}:`, results.errors);
+      throw new Error(`${opName}: ${msg}`);
     }
-    
+
     return [results.data];
   }
 
@@ -376,6 +379,60 @@ class APAClient {
       }
     `;
     return this.graphqlSingle('ViewerQuery', query);
+  }
+
+  // Get viewer's own teams with full roster and schedule — avoids direct team(id) permission restrictions
+  async getViewerTeams(): Promise<{ viewer: GQLViewer & { teams?: GQLTeam[] } }> {
+    const query = `
+      query ViewerWithTeams {
+        viewer {
+          __typename
+          id
+          ... on Member {
+            firstName
+            lastName
+            emailAddress
+            teams {
+              id
+              name
+              number
+              sessionPoints
+              league { id slug __typename }
+              division { id type __typename }
+              roster {
+                id
+                memberNumber
+                displayName
+                matchesWon
+                matchesPlayed
+                skillLevel
+                member { id __typename }
+                alias { id __typename }
+                __typename
+                ... on NineBallPlayer { pa ppm }
+                ... on EightBallPlayer { pa ppm }
+              }
+              matches {
+                week
+                type
+                id
+                status
+                startTime
+                isScored
+                description
+                location { id name __typename }
+                home { id name number isMine __typename }
+                away { id name number isMine __typename }
+                results { homeAway points { total __typename } __typename }
+                __typename
+              }
+              __typename
+            }
+          }
+        }
+      }
+    `;
+    return this.graphqlSingle('ViewerWithTeams', query);
   }
 
   // Get team roster with all player stats
@@ -889,6 +946,7 @@ class APAClient {
             matchesPlayed
             skillLevel
             member { id __typename }
+            alias { id __typename }
             __typename
             ... on NineBallPlayer {
               pa
@@ -903,7 +961,7 @@ class APAClient {
         }
       }
     `;
-    
+
     const operations = teamIds.map(id => ({
       operationName: 'teamRoster',
       query,

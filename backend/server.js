@@ -37,8 +37,8 @@ app.post('/api/graphql', async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': authToken,
-        'Origin': 'https://members.poolplayers.com',
-        'Referer': 'https://members.poolplayers.com/',
+        'Origin': 'https://league.poolplayers.com',
+        'Referer': 'https://league.poolplayers.com/',
       },
       body: JSON.stringify(req.body),
     });
@@ -96,8 +96,8 @@ app.get('/api/lifetime-stats/:aliasId', async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': authToken,
-        'Origin': 'https://members.poolplayers.com',
-        'Referer': 'https://members.poolplayers.com/',
+        'Origin': 'https://league.poolplayers.com',
+        'Referer': 'https://league.poolplayers.com/',
       },
       body: JSON.stringify({
         operationName: 'AliasSessionStats',
@@ -170,8 +170,8 @@ app.post('/api/lifetime-stats/batch', async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': authToken,
-        'Origin': 'https://members.poolplayers.com',
-        'Referer': 'https://members.poolplayers.com/',
+        'Origin': 'https://league.poolplayers.com',
+        'Referer': 'https://league.poolplayers.com/',
       },
       body: JSON.stringify(operations),
     });

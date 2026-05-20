@@ -3,25 +3,18 @@
 import { db } from './db';
 import type { AppConfig } from './types';
 
-// Your team's configuration
-export const MY_TEAM_ID = 12851377; // Internal APA ID
-export const MY_TEAM_NUMBER = '84301';
-export const MY_TEAM_NAME = 'Pocket Pounders';
-export const MY_DIVISION_ID = 416441;
-export const MY_LEAGUE_ID = 1301;
-export const MY_LEAGUE_SLUG = 'eoh';
+// Your team's configuration — updated from APA sync (league.poolplayers.com)
+export const MY_TEAM_ID = 12987919; // Glizzy Gang
+export const MY_TEAM_NUMBER = '';   // populated by sync
+export const MY_TEAM_NAME = 'Glizzy Gang';
+export const MY_DIVISION_ID = 0;    // populated by sync
+export const MY_LEAGUE_ID = 0;      // populated by sync
+export const MY_LEAGUE_SLUG = 'sandiego';
 export const FORMAT = 'NINE' as const;
 
-// All teams in your division (discovered from schedule)
-export const DIVISION_TEAMS = [
-  { id: 12851377, number: '84301', name: 'Pocket Pounders', isOurTeam: true },
-  { id: 12851462, number: '84302', name: '9 Ball Nightmares', isOurTeam: false },
-  { id: 12851501, number: '84303', name: 'Kick Safe', isOurTeam: false },
-  { id: 12851460, number: '84304', name: 'Kill Shots', isOurTeam: false },
-  { id: 12851461, number: '84305', name: 'Extreme 9', isOurTeam: false },
-  { id: 12851459, number: '84306', name: 'Aggressively Average', isOurTeam: false },
-  { id: 12851502, number: '84307', name: 'Pickled Bunch', isOurTeam: false },
-  { id: 12851378, number: '84308', name: 'Underground Wolves', isOurTeam: false },
+// Division teams are discovered dynamically via sync; this list is just for initial DB seed
+export const DIVISION_TEAMS: { id: number; number: string; name: string; isOurTeam: boolean }[] = [
+  { id: 12987919, number: '', name: 'Glizzy Gang', isOurTeam: true },
 ];
 
 export async function seedInitialData(): Promise<void> {

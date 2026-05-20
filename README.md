@@ -36,7 +36,7 @@ npm run dev
 ### 4. Sync APA Data
 
 1. Navigate to the **Sync** screen in the app
-2. Log in to [members.poolplayers.com](https://members.poolplayers.com)
+2. Log in to [league.poolplayers.com](https://league.poolplayers.com)
 3. Open Developer Tools (F12) → Network tab
 4. Find any request to `gql.poolplayers.com/graphql`
 5. Copy the token from the `Authorization` header (after "Bearer ")
