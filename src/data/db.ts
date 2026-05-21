@@ -1,4 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie';
+import { exportDB, importInto } from 'dexie-export-import';
 import type {
   Team,
   Player,
@@ -179,6 +180,22 @@ export async function clearAllData(): Promise<void> {
     playersCount: 0,
     matchesCount: 0,
   });
+}
+
+export async function downloadDatabaseBackup(): Promise<void> {
+  const blob = await exportDB(db);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `MatchUpDB-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export async function restoreDatabaseBackup(file: File): Promise<void> {
+  await importInto(db, file, { clearTablesBeforeImport: true });
 }
 
 // Export database instance

@@ -4,7 +4,7 @@ import { useSyncStore } from '../../store/sync-store';
 import { useTeamStore } from '../../store/team-store';
 import { LinearConfidence } from '../ui/ConfidenceMeter';
 import { apaClient } from '../../scraper/apa-client';
-import { db } from '../../data/db';
+import { db, downloadDatabaseBackup, restoreDatabaseBackup } from '../../data/db';
 import type { Player } from '../../data/types';
 
 export function SyncScreen() {
@@ -26,6 +26,7 @@ export function SyncScreen() {
   
   const [tokenInput, setTokenInput] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [debugPlayer, setDebugPlayer] = useState<Player | null>(null);
 
@@ -254,6 +255,49 @@ export function SyncScreen() {
           >
             {isValidToken ? 'Update' : 'Set Token'}
           </button>
+        </div>
+      </div>
+
+      {/* Backup / Restore */}
+      <div className="mb-6 p-4 rounded-xl bg-slate-800/50 border border-slate-700">
+        <h2 className="text-white font-semibold mb-2">💾 Backup & Restore</h2>
+        <p className="text-slate-400 text-sm mb-4">
+          Export the local database to a JSON file, or restore from a previous backup.
+        </p>
+        {restoreError && (
+          <p className="text-red-400 text-sm mb-3">❌ {restoreError}</p>
+        )}
+        <div className="flex gap-2">
+          <button
+            onClick={async () => { await downloadDatabaseBackup(); }}
+            disabled={syncStatus.playersCount === 0}
+            className="flex-1 py-2 px-3 rounded-lg bg-slate-700 text-white text-sm font-medium hover:bg-slate-600 transition-colors disabled:opacity-40"
+          >
+            Export backup
+          </button>
+          <label className="flex-1">
+            <span className="block w-full py-2 px-3 rounded-lg bg-slate-700 text-white text-sm font-medium hover:bg-slate-600 transition-colors text-center cursor-pointer">
+              Restore backup
+            </span>
+            <input
+              type="file"
+              accept=".json"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                setRestoreError(null);
+                try {
+                  await restoreDatabaseBackup(file);
+                  await loadTeams();
+                  await loadAllPlayers();
+                } catch (err) {
+                  setRestoreError(err instanceof Error ? err.message : 'Restore failed');
+                }
+                e.target.value = '';
+              }}
+            />
+          </label>
         </div>
       </div>
 
