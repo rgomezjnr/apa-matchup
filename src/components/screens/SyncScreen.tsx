@@ -9,11 +9,11 @@ import type { Player } from '../../data/types';
 
 export function SyncScreen() {
   const navigate = useNavigate();
-  const { 
-    syncStatus, 
+  const {
+    syncStatus,
     isValidToken,
-    syncProgress, 
-    syncMessage, 
+    syncProgress,
+    syncMessage,
     syncError,
     lastRosterSync,
     loadSyncStatus,

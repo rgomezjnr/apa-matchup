@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { db, updateSyncStatus, getSyncStatus } from '../data/db';
 import { apaClient, type GQLTeam, type GQLViewer, type GQLPlayer, type GQLMatch } from '../scraper/apa-client';
-import { MY_TEAM_ID, MY_DIVISION_ID, FORMAT, seedInitialData } from '../data/seed';
+import { MY_TEAM_ID, MY_DIVISION_ID, MY_LEAGUE_SLUG, FORMAT, seedInitialData } from '../data/seed';
 import type { SyncStatus, Team, Player, Match } from '../data/types';
 
 interface SyncState {
@@ -10,20 +10,24 @@ interface SyncState {
   syncStatus: SyncStatus;
   authToken: string | null;
   isValidToken: boolean;
-  
+
   // Progress
   syncProgress: number;
   syncMessage: string;
   syncError: string | null;
-  
+
   // Last sync timestamps
   lastScheduleSync: Date | null;
   lastRosterSync: Date | null;
-  
+
+  // APA session ID for member profile scraping (found in any profile URL: .../nine/139)
+  apaSessionId: number | null;
+
   // Actions
   loadSyncStatus: () => Promise<void>;
   setAuthToken: (token: string) => Promise<boolean>;
   clearAuthToken: () => void;
+  setApaSessionId: (id: number | null) => void;
   syncAll: (forceRefresh?: boolean) => Promise<void>;
   testConnection: () => Promise<{ success: boolean; message: string }>;
 }
@@ -116,6 +120,7 @@ export const useSyncStore = create<SyncState>()(
       syncError: null,
       lastScheduleSync: null,
       lastRosterSync: null,
+      apaSessionId: null,
 
       loadSyncStatus: async () => {
         await seedInitialData();
@@ -166,6 +171,10 @@ export const useSyncStore = create<SyncState>()(
       clearAuthToken: () => {
         apaClient.clearAuthToken();
         set({ authToken: null, isValidToken: false });
+      },
+
+      setApaSessionId: (id) => {
+        set({ apaSessionId: id });
       },
 
       testConnection: async () => {
@@ -331,8 +340,54 @@ export const useSyncStore = create<SyncState>()(
             }
           }
           
-          // Step 5: Update sync status
-          // (Lifetime stats are now fetched inline with roster via alias { NineBallStats EightBallStats })
+          // Step 6: Fetch lifetime stats by summing member session history across all sessions
+          set({ syncProgress: 92, syncMessage: 'Fetching lifetime stats...' });
+          const allPlayers = await db.players.toArray();
+          const seenMembers = new Set<number>();
+          const uniqueMemberIds = allPlayers
+            .filter(p => p.memberId > 0)
+            .map(p => p.memberId)
+            .filter(id => { if (seenMembers.has(id)) return false; seenMembers.add(id); return true; });
+
+          console.log(`[sync] Fetching player records for ${uniqueMemberIds.length} unique members`);
+          const playerTypeName = FORMAT === 'NINE' ? 'NineBallPlayer' : 'EightBallPlayer';
+          const BATCH = 20;
+          for (let i = 0; i < uniqueMemberIds.length; i += BATCH) {
+            const chunk = uniqueMemberIds.slice(i, i + BATCH);
+            try {
+              const results = await apaClient.getMultipleMemberPlayerRecords(chunk);
+              for (let j = 0; j < chunk.length; j++) {
+                const memberId = chunk[j];
+                const allRecords = results[j]?.member?.players;
+                if (!allRecords?.length) {
+                  console.warn(`[sync] No player records for member ${memberId}`);
+                  continue;
+                }
+                // Filter to the right format and sum across all sessions
+                const formatRecords = allRecords.filter(p => p.__typename === playerTypeName);
+                let lifetimeWon = 0;
+                let lifetimePlayed = 0;
+                for (const record of formatRecords) {
+                  lifetimeWon += record.matchesWon ?? 0;
+                  lifetimePlayed += record.matchesPlayed ?? 0;
+                }
+                const winPct = lifetimePlayed > 0 ? (lifetimeWon / lifetimePlayed) * 100 : 0;
+                const playersToUpdate = allPlayers.filter(p => p.memberId === memberId);
+                for (const player of playersToUpdate) {
+                  await db.players.update(player.id, {
+                    lifetimeMatchesPlayed: lifetimePlayed,
+                    lifetimeMatchesWon: lifetimeWon,
+                    lifetimeWinPct: winPct,
+                  });
+                }
+                console.log(`✅ member ${memberId}: ${lifetimeWon}W/${lifetimePlayed}P (${formatRecords.length} sessions)`);
+              }
+            } catch (err) {
+              console.warn('[sync] Player records batch failed:', err);
+            }
+            const progress = 92 + Math.round(((i + BATCH) / uniqueMemberIds.length) * 6);
+            set({ syncProgress: Math.min(progress, 98), syncMessage: `Lifetime stats: ${Math.min(i + BATCH, uniqueMemberIds.length)}/${uniqueMemberIds.length}` });
+          }
           set({ syncProgress: 98, syncMessage: 'Finalizing...' });
           
           const teamsCount = await db.teams.count();
@@ -380,6 +435,7 @@ export const useSyncStore = create<SyncState>()(
         isValidToken: state.isValidToken,
         lastScheduleSync: state.lastScheduleSync,
         lastRosterSync: state.lastRosterSync,
+        apaSessionId: state.apaSessionId,
       }),
       onRehydrateStorage: () => (state) => {
         // Restore token to apaClient when store is rehydrated from localStorage

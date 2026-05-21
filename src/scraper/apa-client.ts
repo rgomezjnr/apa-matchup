@@ -890,6 +890,30 @@ class APAClient {
     return this.graphqlSingle('memberSessionHistory', query, { id: memberId, format });
   }
 
+  // Batch fetch all player records for each member (lifetime stats via summing across sessions)
+  async getMultipleMemberPlayerRecords(memberIds: number[]): Promise<Array<{ member: { id: number; players: Array<{ id: number; matchesWon: number; matchesPlayed: number; __typename: string }> } }>> {
+    const query = `
+      query memberPlayers($id: Int!) {
+        member(id: $id) {
+          id
+          players {
+            id
+            matchesWon
+            matchesPlayed
+            __typename
+          }
+          __typename
+        }
+      }
+    `;
+    const operations = memberIds.map(id => ({
+      operationName: 'memberPlayers',
+      query,
+      variables: { id },
+    }));
+    return this.graphql(operations);
+  }
+
   // Fetch multiple players' match histories in parallel
   async getMultiplePlayerHistories(playerIds: number[]): Promise<GQLPlayerMatchHistory[]> {
     const query = `
@@ -970,6 +994,43 @@ class APAClient {
     
     const results = await this.graphql<{ team: GQLTeam }>(operations);
     return results.map(r => r.team);
+  }
+
+  // Discover the current APA session ID using a known player's member profile page.
+  // The backend requests the page without a session ID and extracts it from the redirect URL.
+  async discoverSessionId(leagueSlug: string, memberId: number, aliasId: number, format: 'NINE' | 'EIGHT'): Promise<number | null> {
+    if (!this.authToken) throw new Error('Authentication required');
+    const response = await fetch(
+      `${PROXY_URL}/api/discover-session/${leagueSlug}/${memberId}/${aliasId}/${format}`,
+      { headers: { 'Authorization': this.authToken } }
+    );
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      console.warn('[discoverSessionId] failed:', err);
+      return null;
+    }
+    const data = await response.json();
+    return data.sessionId ?? null;
+  }
+
+  // Batch scrape member profile pages for lifetime stats
+  async scrapeLifetimeStatsBatch(
+    players: Array<{ memberId: number; aliasId: number }>,
+    leagueSlug: string,
+    format: 'NINE' | 'EIGHT',
+    sessionId: number
+  ): Promise<Array<{ memberId: number; aliasId: number; stats: { matchesWon?: number; matchesPlayed?: number; defensiveShotAvg?: number | null; error?: string; htmlSnippet?: string } }>> {
+    if (!this.authToken) throw new Error('Authentication required');
+    const response = await fetch(`${PROXY_URL}/api/scrape-members/batch`, {
+      method: 'POST',
+      headers: {
+        'Authorization': this.authToken,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ players, leagueSlug, format, sessionId }),
+    });
+    if (!response.ok) throw new Error(`Scrape batch failed: ${response.status}`);
+    return response.json();
   }
 
   // Test connection

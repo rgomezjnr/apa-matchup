@@ -184,113 +184,196 @@ app.post('/api/lifetime-stats/batch', async (req, res) => {
   }
 });
 
-// Scrape member profile page for lifetime stats (fallback)
-app.get('/api/scrape-lifetime/:leagueSlug/:memberId/:aliasId/:format/:sessionId', async (req, res) => {
-  const authToken = req.headers.authorization;
-  const { leagueSlug, memberId, aliasId, format, sessionId } = req.params;
-  
-  if (!authToken) {
-    return res.status(401).json({ error: 'Authorization header required' });
+// ── Scraping helpers ────────────────────────────────────────────────────────
+
+const SCRAPE_HEADERS = (token) => ({
+  'Cookie': `access_token=${token}`,
+  'Accept': 'text/html,application/xhtml+xml',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+});
+
+// Parse __NEXT_DATA__ JSON from an HTML page
+function parseNextData(html) {
+  const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+  if (!m) return null;
+  try { return JSON.parse(m[1]); } catch { return null; }
+}
+
+// Recursively search an object for a node that has both matchesWon and matchesPlayed.
+// Prefers NineBallStats / EightBallStats arrays (lifetime records on an Alias).
+function findStats(obj, formatKey, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 15) return null;
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const r = findStats(item, formatKey, depth + 1);
+      if (r) return r;
+    }
+    return null;
+  }
+  // Prefer the named stats array (alias lifetime stats)
+  if (Array.isArray(obj[formatKey]) && obj[formatKey].length > 0) {
+    const s = obj[formatKey][0];
+    if (typeof s?.matchesWon === 'number') return s;
+  }
+  // Also accept a plain stats object
+  if (typeof obj.matchesWon === 'number' && typeof obj.matchesPlayed === 'number') {
+    return obj;
+  }
+  for (const v of Object.values(obj)) {
+    const r = findStats(v, formatKey, depth + 1);
+    if (r) return r;
+  }
+  return null;
+}
+
+// Extract current session ID from a page's HTML.
+// Looks for member profile URLs like /sandiego/member/123/456/nine/139
+function extractSessionId(html, leagueSlug) {
+  const patterns = [
+    new RegExp(`/${leagueSlug}/member/\\d+/\\d+/(?:nine|eight)/(\\d+)`, 'i'),
+    /\/member\/\d+\/\d+\/(?:nine|eight)\/(\d+)/i,
+  ];
+  for (const p of patterns) {
+    const m = html.match(p);
+    if (m) return parseInt(m[1], 10);
+  }
+  // Fall back: look in __NEXT_DATA__ for a session id
+  const data = parseNextData(html);
+  if (data) {
+    const found = deepFindSessionId(data, 0);
+    if (found) return found;
+  }
+  return null;
+}
+
+function deepFindSessionId(obj, depth) {
+  if (!obj || typeof obj !== 'object' || depth > 12) return null;
+  if (typeof obj.sessionId === 'number') return obj.sessionId;
+  if (obj.session && typeof obj.session.id === 'number') return obj.session.id;
+  for (const v of Object.values(obj)) {
+    const r = deepFindSessionId(v, depth + 1);
+    if (r) return r;
+  }
+  return null;
+}
+
+// Fetch and parse a single member profile page
+async function scrapeMemberPage(token, leagueSlug, memberId, aliasId, formatPath, sessionId) {
+  const url = `https://league.poolplayers.com/${leagueSlug}/member/${memberId}/${aliasId}/${formatPath}/${sessionId}`;
+  const response = await fetch(url, { headers: SCRAPE_HEADERS(token) });
+  if (!response.ok) return { error: `HTTP ${response.status}` };
+
+  const html = await response.text();
+  const formatKey = formatPath === 'nine' ? 'NineBallStats' : 'EightBallStats';
+
+  // Try __NEXT_DATA__ JSON first
+  const nextData = parseNextData(html);
+  if (nextData) {
+    const s = findStats(nextData, formatKey);
+    if (s) {
+      return {
+        matchesWon: s.matchesWon,
+        matchesPlayed: s.matchesPlayed ?? 0,
+        defensiveShotAvg: s.defensiveShotAvg ?? s.defensiveShotAverage ?? null,
+      };
+    }
   }
 
+  // Regex fallback
+  const wonMatch = html.match(/"matchesWon"\s*:\s*(\d+)/) || html.match(/(\d+)\s*<\/[^>]+>\s*<[^>]+>\s*WON/i);
+  const playedMatch = html.match(/"matchesPlayed"\s*:\s*(\d+)/) || html.match(/(\d+)\s*<\/[^>]+>\s*<[^>]+>\s*PLAYED/i);
+  const defMatch = html.match(/"defensiveShotAvg"\s*:\s*([\d.]+)/);
+
+  if (wonMatch && playedMatch) {
+    return {
+      matchesWon: parseInt(wonMatch[1], 10),
+      matchesPlayed: parseInt(playedMatch[1], 10),
+      defensiveShotAvg: defMatch ? parseFloat(defMatch[1]) : null,
+    };
+  }
+
+  // Return a small HTML snippet to help debug if nothing matched
+  return { error: 'Stats not found', htmlSnippet: html.substring(0, 1000) };
+}
+
+// ── Scraping endpoints ───────────────────────────────────────────────────────
+
+// Discover the current APA session ID using a known player's member profile page.
+// Requests the URL without a session ID; Next.js redirects to the current session's
+// URL (e.g. /nine/139), and we extract the session ID from response.url.
+app.get('/api/discover-session/:leagueSlug/:memberId/:aliasId/:format', async (req, res) => {
+  const authToken = req.headers.authorization;
+  const { leagueSlug, memberId, aliasId, format } = req.params;
+  if (!authToken) return res.status(401).json({ error: 'Authorization header required' });
+
+  const token = authToken.replace('Bearer ', '');
   const formatPath = format === 'NINE' ? 'nine' : 'eight';
-  const url = `https://league.poolplayers.com/${leagueSlug}/member/${memberId}/${aliasId}/${formatPath}/${sessionId}`;
+  const url = `https://league.poolplayers.com/${leagueSlug}/member/${memberId}/${aliasId}/${formatPath}`;
 
   try {
-    // Extract just the token part (remove "Bearer " if present)
-    const token = authToken.replace('Bearer ', '');
-    
-    const response = await fetch(url, {
-      headers: {
-        'Cookie': `access_token=${token}`,
-        'Accept': 'text/html,application/xhtml+xml',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      },
-    });
+    const response = await fetch(url, { headers: SCRAPE_HEADERS(token) });
 
-    if (!response.ok) {
-      return res.status(response.status).json({ 
-        error: 'Failed to fetch member page', 
-        status: response.status 
-      });
+    // Check the final URL after any redirects for a session ID
+    const finalUrl = response.url;
+    const urlMatch = finalUrl.match(/\/(?:nine|eight)\/(\d+)/);
+    if (urlMatch) {
+      const sessionId = parseInt(urlMatch[1], 10);
+      console.log(`Discovered session ID ${sessionId} from redirect: ${finalUrl}`);
+      return res.json({ sessionId });
     }
 
+    // No redirect — search the returned page HTML
     const html = await response.text();
-    
-    // Parse lifetime stats from HTML - looking for the stats in the page
-    // The structure varies, so we try multiple patterns
-    
-    let matchesWon = null;
-    let matchesPlayed = null;
-    let defensiveShotAvg = null;
-    
-    // Pattern 1: Look for numbers near "WON" and "PLAYED" text
-    const wonPatterns = [
-      /(\d+)\s*<\/[^>]+>\s*<[^>]+>\s*WON/i,
-      /WON[^<]*<[^>]+>\s*(\d+)/i,
-      /"matchesWon":\s*(\d+)/i,
-    ];
-    
-    const playedPatterns = [
-      /(\d+)\s*<\/[^>]+>\s*<[^>]+>\s*PLAYED/i,
-      /PLAYED[^<]*<[^>]+>\s*(\d+)/i,
-      /"matchesPlayed":\s*(\d+)/i,
-    ];
-    
-    const defAvgPatterns = [
-      /defensiveShotAvg[^:]*:\s*([\d.]+)/i,
-      /Defensive[^<]*<[^>]+>\s*([\d.]+)/i,
-      /"defensiveShotAvg":\s*([\d.]+)/i,
-    ];
-    
-    for (const pattern of wonPatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        matchesWon = parseInt(match[1], 10);
-        break;
-      }
+    const sessionId = extractSessionId(html, leagueSlug);
+    if (sessionId) {
+      console.log(`Discovered session ID ${sessionId} from page content`);
+      return res.json({ sessionId });
     }
-    
-    for (const pattern of playedPatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        matchesPlayed = parseInt(match[1], 10);
-        break;
-      }
-    }
-    
-    for (const pattern of defAvgPatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        defensiveShotAvg = parseFloat(match[1]);
-        break;
-      }
-    }
-    
-    if (matchesWon !== null && matchesPlayed !== null) {
-      const winPct = matchesPlayed > 0 ? (matchesWon / matchesPlayed) * 100 : 0;
-      res.json({
-        success: true,
-        stats: {
-          matchesWon,
-          matchesPlayed,
-          winPct,
-          defensiveShotAvg,
-        }
-      });
-    } else {
-      // Return the HTML snippet for debugging
-      const snippet = html.substring(0, 2000);
-      res.json({
-        success: false,
-        error: 'Could not parse lifetime stats from HTML',
-        htmlSnippet: snippet,
-      });
-    }
+
+    // Return debug info so we can see what the page contains
+    const nextData = parseNextData(html);
+    console.warn('Session ID not found. finalUrl:', finalUrl);
+    res.status(404).json({
+      error: 'Session ID not found',
+      finalUrl,
+      nextDataKeys: nextData ? Object.keys(nextData) : null,
+      htmlSnippet: html.substring(0, 400),
+    });
   } catch (error) {
-    console.error('Scrape error:', error);
-    res.status(500).json({ error: 'Failed to scrape member page', details: error.message });
+    res.status(500).json({ error: 'Failed to discover session ID', details: error.message });
   }
+});
+
+// Batch scrape member profiles for lifetime stats (5 concurrent)
+app.post('/api/scrape-members/batch', async (req, res) => {
+  const authToken = req.headers.authorization;
+  const { players, leagueSlug, format, sessionId } = req.body;
+  if (!authToken) return res.status(401).json({ error: 'Authorization header required' });
+  if (!Array.isArray(players) || !leagueSlug || !format || !sessionId) {
+    return res.status(400).json({ error: 'players[], leagueSlug, format, sessionId required' });
+  }
+
+  const token = authToken.replace('Bearer ', '');
+  const formatPath = format === 'NINE' ? 'nine' : 'eight';
+  const CONCURRENCY = 5;
+  const results = [];
+
+  for (let i = 0; i < players.length; i += CONCURRENCY) {
+    const chunk = players.slice(i, i + CONCURRENCY);
+    const chunkResults = await Promise.all(
+      chunk.map(({ memberId, aliasId }) =>
+        scrapeMemberPage(token, leagueSlug, memberId, aliasId, formatPath, sessionId)
+          .then(stats => ({ memberId, aliasId, stats }))
+          .catch(err => ({ memberId, aliasId, stats: { error: err.message } }))
+      )
+    );
+    results.push(...chunkResults);
+    if (i + CONCURRENCY < players.length) {
+      await new Promise(r => setTimeout(r, 250));
+    }
+  }
+
+  res.json(results);
 });
 
 app.listen(PORT, () => {
