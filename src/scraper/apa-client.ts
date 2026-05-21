@@ -686,6 +686,25 @@ class APAClient {
     return this.graphql(operations);
   }
 
+  // Introspect a GraphQL type to discover its field names (via backend proxy)
+  async introspectType(typeName: string): Promise<Array<{ name: string }> | null> {
+    if (!this.authToken) throw new Error('Authentication required');
+    const response = await fetch(`${PROXY_URL}/api/graphql`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': this.authToken,
+      },
+      body: JSON.stringify({
+        operationName: 'IntrospectType',
+        query: `query IntrospectType($name: String!) { __type(name: $name) { name fields { name type { name kind ofType { name kind } } } } }`,
+        variables: { name: typeName },
+      }),
+    });
+    const data = await response.json();
+    return data?.data?.__type?.fields ?? null;
+  }
+
   // Get lifetime stats for an alias via backend proxy (bypasses CORS)
   async getAliasLifetimeStats(aliasId: number): Promise<GQLAliasStats> {
     if (!this.authToken) {
@@ -711,11 +730,13 @@ class APAClient {
     return result;
   }
 
-  // Batch fetch lifetime stats for multiple aliases via backend proxy
-  async getMultipleAliasLifetimeStats(aliasIds: number[]): Promise<GQLAliasStats[]> {
-    if (!this.authToken) {
-      throw new Error('Authentication required');
-    }
+  // Batch fetch lifetime stats for multiple aliases via backend proxy.
+  // Returns a flat stats object per alias (or null on error/missing data).
+  async getMultipleAliasLifetimeStats(
+    aliasIds: number[],
+    format: 'NINE' | 'EIGHT'
+  ): Promise<Array<{ matchesWon: number; matchesPlayed: number; defensiveShotAvg?: number | null } | null>> {
+    if (!this.authToken) throw new Error('Authentication required');
 
     const response = await fetch(`${PROXY_URL}/api/lifetime-stats/batch`, {
       method: 'POST',
@@ -723,27 +744,29 @@ class APAClient {
         'Authorization': this.authToken,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ aliasIds }),
+      body: JSON.stringify({ aliasIds, format }),
     });
 
-    if (!response.ok) {
-      throw new Error(`Proxy batch request failed: ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`Proxy batch request failed: ${response.status}`);
 
     const results = await response.json();
-    
-    // Handle array of results
-    if (Array.isArray(results)) {
-      return results.map(result => {
-        if (result.errors) {
-          console.warn('GraphQL error in batch:', result.errors);
-          return { data: { alias: null } };
-        }
-        return result;
-      });
-    }
+    if (!Array.isArray(results)) throw new Error('Unexpected response shape from lifetime-stats/batch');
 
-    return results;
+    return results.map((result, i) => {
+      if (result.errors) {
+        console.warn(`[alias ${aliasIds[i]}] GraphQL errors:`, result.errors);
+        return null;
+      }
+      const aliasObj = result?.data?.alias;
+      if (!aliasObj) return null;
+      if (i === 0) console.log('[alias raw]', JSON.stringify(aliasObj));
+      if (typeof aliasObj.matchesWon !== 'number') return null;
+      return {
+        matchesWon: aliasObj.matchesWon,
+        matchesPlayed: aliasObj.matchesPlayed ?? 0,
+        defensiveShotAvg: null,
+      };
+    });
   }
 
   // Get member's lifetime stats (deprecated - use getAliasLifetimeStats instead)

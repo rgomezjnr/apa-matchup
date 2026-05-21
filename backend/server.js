@@ -114,54 +114,34 @@ app.get('/api/lifetime-stats/:aliasId', async (req, res) => {
   }
 });
 
-// Batch fetch lifetime stats for multiple aliases
+// Batch fetch lifetime stats for multiple aliases.
+// Tries camelCase field names (nineBallStats/eightBallStats); falls back to PascalCase.
+// Returns raw array of GQL responses so the client can inspect actual field names.
 app.post('/api/lifetime-stats/batch', async (req, res) => {
   const authToken = req.headers.authorization;
   const { aliasIds } = req.body;
-  
-  if (!authToken) {
-    return res.status(401).json({ error: 'Authorization header required' });
-  }
 
+  if (!authToken) return res.status(401).json({ error: 'Authorization header required' });
   if (!Array.isArray(aliasIds) || aliasIds.length === 0) {
     return res.status(400).json({ error: 'aliasIds array required' });
   }
 
+  const { format = 'NINE' } = req.body;
   const query = `
-    query AliasSessionStats($id: Int!) {
+    query AliasLifetimeStats($id: Int!, $format: FormatTypeMapped!) {
       alias(id: $id) {
         id
-        displayName
-        EightBallStats {
-          id
-          matchesWon
-          matchesPlayed
-          CLA
-          defensiveShotAvg
-          matchCountForLastTwoYrs
-          lastPlayed
-          __typename
-        }
-        NineBallStats {
-          id
-          matchesWon
-          matchesPlayed
-          CLA
-          defensiveShotAvg
-          matchCountForLastTwoYrs
-          lastPlayed
-          __typename
-        }
         __typename
+        matchesWon(format: $format)
+        matchesPlayed(format: $format)
       }
     }
   `;
 
-  // Build batch request (APA GraphQL supports array of operations)
   const operations = aliasIds.map(id => ({
-    operationName: 'AliasSessionStats',
+    operationName: 'AliasLifetimeStats',
     query,
-    variables: { id: parseInt(id, 10) },
+    variables: { id: parseInt(id, 10), format },
   }));
 
   try {
